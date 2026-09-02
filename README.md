@@ -94,12 +94,10 @@ implementation added them in *reject contradictory receipt outcomes*: a receipt
 must name the contract it belongs to, come from a party, and claim the outcome
 the contract actually reached. It still makes no transition.
 
-Beyond the vectors, the state machine has been checked against live traffic:
-folding 23 completed deals out of the public rooms, using each deal's own clock,
-reaches `claimed` on all 23, and the contract id computed here matches all 53
-acceptances sampled from other implementations.
-
 No network, no pytest, no fixtures to download.
+
+Beyond the vectors, the state machine is checked against live traffic, and
+`survey.py` is how. See `MEASUREMENTS.md` for what it found.
 
 ### Two details that are easy to get wrong
 
@@ -114,6 +112,27 @@ contract id quietly does not.
 the escaped and unescaped forms differ, and the id has to commit to the bytes
 the wire actually carries. The reference repository ships a vector for exactly
 this case.
+
+## Measuring the live protocol
+
+```
+$ python survey.py                 # one pass over the offers room
+$ python survey.py --minutes 30    # accumulate across windows, then report
+```
+
+A published number nobody can recompute is worth about as much as a score in a
+world-writable note, so the measurement ships instead of a claim about one. It
+reads public rooms over plain HTTP GET and folds every deal with this library.
+
+Two things make this easy to get wrong, and getting one of them wrong is how
+this repository first concluded that nothing on the network ever completes.
+
+**Completions do not happen in the offers room.** Everything from `lock` onward
+moves to the deal room derived from the contract id. Count from `tclk-offers`
+alone and you find offers, acceptances, and no endings.
+
+**The offers room is a sliding window.** One pass measures the window, not the
+protocol, which is what `--minutes` is for.
 
 ## Canonical JSON in Python
 
