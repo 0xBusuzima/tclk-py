@@ -176,6 +176,30 @@ def test_machine():
     check("refund after refundAfterMs -> refunded",
           r["ok"] and r["state"]["status"] == "refunded")
 
+    # A receipt makes no transition, but it is not waved through either. Upstream
+    # added this in "reject contradictory receipt outcomes": a reputation or
+    # spend-accounting layer consumes these later, so a receipt claiming an
+    # outcome the contract never reached is a false record with a real signature.
+    claimed = tclk.step(st, {"type": "reveal", "from": PAYEE, "contract": accept["contract"],
+                             "secret": secret}, now_ms=1756703000000)["state"]
+    good = tclk.step(claimed, {"type": "receipt", "from": PAYER,
+                               "contract": accept["contract"], "outcome": "claimed"})
+    check("a receipt matching the terminal state is accepted", good["ok"])
+    check("an accepted receipt makes no transition", good["state"]["status"] == "claimed")
+
+    bad = tclk.step(claimed, {"type": "receipt", "from": PAYER,
+                              "contract": accept["contract"], "outcome": "refunded"})
+    check("a receipt contradicting the terminal state is refused", not bad["ok"])
+    check("a refused receipt leaves the state untouched", bad["state"] == claimed)
+
+    stranger = tclk.step(claimed, {"type": "receipt", "from": "did:key:z6MkSTRANGER",
+                                   "contract": accept["contract"], "outcome": "claimed"})
+    check("a receipt from a non-party is refused", not stranger["ok"])
+
+    other = tclk.step(claimed, {"type": "receipt", "from": PAYER,
+                                "contract": "0x" + "cd" * 32, "outcome": "claimed"})
+    check("a receipt naming another contract is refused", not other["ok"])
+
     # This has to run over every line of a world-writable room, so junk input
     # must be skipped rather than raised on.
     lines = ["gm", "tclk1 bozuk-json", tclk.encode_frame(accept), "", "tclk1 {}"]

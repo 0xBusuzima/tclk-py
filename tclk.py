@@ -238,12 +238,24 @@ def step(state: dict, frame: dict, now_ms=None) -> dict:
         return {"ok": False, "reason": reason, "state": state}
 
     kind = frame.get("type")
+    offer = state.get("offer") or {}
+
     if kind == "receipt":
-        return {"ok": True, "state": state}          # informational, not a transition
+        # A post-terminal acknowledgment. It makes no transition, but it is not
+        # waved through either. A reputation or spend-accounting layer reads
+        # these later, so a receipt claiming an outcome the contract never
+        # reached would be a false record carrying a real party's signature.
+        if frame.get("contract") != state.get("contract"):
+            return no("receipt names a different contract")
+        if frame.get("from") not in (offer.get("from"), state.get("payee")):
+            return no("receipt from a non-party")
+        if frame.get("outcome") != state.get("status"):
+            return no(f"receipt outcome {frame.get('outcome')} does not match "
+                      f"{state.get('status')}")
+        return {"ok": True, "state": state}
+
     if kind not in TRANSITIONS.get(state.get("status", "proposed"), {}):
         return no(f"'{kind}' is not valid while {state.get('status')}")
-
-    offer = state.get("offer") or {}
     if kind == "accept":
         if frame.get("ref") != offer.get("id"):
             return no("this acceptance refers to a different offer")

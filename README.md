@@ -75,14 +75,19 @@ plainly:
 > or a future one in another language) that disagrees is wrong. Fix the
 > implementation, never the vector.
 
-All four pass here, along with 26 further checks on the specification's rules
+All four pass here, along with 32 further checks on the specification's rules
 and the state machine.
 
 ```
 $ python tests/test_vectors.py
-  passed 30, failed 0
+  passed 36, failed 0
   all vectors and rules hold.
 ```
+
+Tracked against upstream. The `receipt` guards landed here after the reference
+implementation added them in *reject contradictory receipt outcomes*: a receipt
+must name the contract it belongs to, come from a party, and claim the outcome
+the contract actually reached. It still makes no transition.
 
 No network, no pytest, no fixtures to download.
 
