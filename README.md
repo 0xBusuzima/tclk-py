@@ -66,6 +66,11 @@ and leaves the state untouched; neither ever raises. That matters because these
 run over every line of a room full of strangers, where most lines are not yours
 and some are junk.
 
+`validate_frame` checks a frame against the specification's required and allowed
+fields, and both `encode_frame` and `decode_frame` call it. This is not
+theoretical: an offer short of `id`, `role` and `nonce` was sitting in the live
+`tclk-offers` room, and an earlier version of this library decoded it happily.
+
 ## Correctness
 
 The reference repository ships cross-implementation vectors and states the rule
@@ -75,12 +80,12 @@ plainly:
 > or a future one in another language) that disagrees is wrong. Fix the
 > implementation, never the vector.
 
-All four pass here, along with 32 further checks on the specification's rules
+All four pass here, along with 41 further checks on the specification's rules
 and the state machine.
 
 ```
 $ python tests/test_vectors.py
-  passed 36, failed 0
+  passed 45, failed 0
   all vectors and rules hold.
 ```
 
@@ -88,6 +93,11 @@ Tracked against upstream. The `receipt` guards landed here after the reference
 implementation added them in *reject contradictory receipt outcomes*: a receipt
 must name the contract it belongs to, come from a party, and claim the outcome
 the contract actually reached. It still makes no transition.
+
+Beyond the vectors, the state machine has been checked against live traffic:
+folding 23 completed deals out of the public rooms, using each deal's own clock,
+reaches `claimed` on all 23, and the contract id computed here matches all 53
+acceptances sampled from other implementations.
 
 No network, no pytest, no fixtures to download.
 

@@ -101,11 +101,53 @@ def test_rules():
     for bad, why in ((0, "claimByMs == refundAfterMs"), (1, "claimByMs > refundAfterMs")):
         try:
             tclk.make_offer(frm=PAYER, amount="1", asset="FLOP", rails=["r"],
-                            claim_by_ms=1000 + bad, refund_after_ms=1000)
+                            claim_by_ms=1000 + bad, refund_after_ms=1000,
+                            expires_ms=900)
             ok = False
         except tclk.TclkError:
             ok = True
         check(f"refused: {why}", ok)
+
+    # expiresMs is required on an offer. It reads as optional, so it is easy to
+    # leave out, and an offer without it is refused by a conforming reader.
+    try:
+        tclk.make_offer(frm=PAYER, amount="1", asset="FLOP", rails=["r"],
+                        claim_by_ms=1000, refund_after_ms=2000)
+        ok = False
+    except TypeError:
+        ok = True
+    check("an offer without expiresMs cannot even be built", ok)
+
+    # Structural validation. Without it a frame missing required fields decodes
+    # happily and fails later somewhere with no idea why. One such offer, short
+    # of id, role and nonce, was sitting in the live tclk-offers room.
+    for frame, why in (
+            ({"type": "offer", "from": PAYER}, "offer missing almost everything"),
+            ({"type": "accept", "from": PAYEE, "ref": OFFER_ID}, "accept missing statement"),
+            ({"type": "reveal", "from": PAYEE, "contract": CONTRACT_ID}, "reveal missing secret"),
+            ({"type": "receipt", "from": PAYER, "contract": CONTRACT_ID}, "receipt missing outcome"),
+            ({"type": "nonsense", "from": PAYER}, "unknown frame type")):
+        try:
+            tclk.validate_frame(frame)
+            ok = False
+        except tclk.TclkError:
+            ok = True
+        check(f"refused: {why}", ok)
+
+    try:
+        tclk.validate_frame(dict(offer, surprise="x"))
+        ok = False
+    except tclk.TclkError:
+        ok = True
+    check("refused: frame carrying an unknown field", ok)
+    check("a well-formed frame validates", tclk.validate_frame(offer) is offer)
+
+    try:
+        tclk.decode_frame('tclk1 {"type":"offer","from":"' + PAYER + '"}')
+        ok = False
+    except tclk.TclkError:
+        ok = True
+    check("decode_frame refuses a structurally invalid frame", ok)
 
     try:
         tclk.make_accept(offer, frm=PAYER, statement="0x" + "ab" * 32)

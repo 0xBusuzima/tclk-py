@@ -40,6 +40,41 @@ HEX33 = re.compile(r"^0x[0-9a-f]{66}$")
 
 FRAME_TYPES = ("offer", "accept", "lock", "reveal", "refund", "cancel", "receipt")
 
+# What each frame type may carry and must carry. Taken from the reference
+# implementation's KEYS table.
+#
+# Checking this matters more than it looks. Without it a frame missing `id`,
+# `role` and `nonce` decodes happily and only fails later, somewhere that has
+# no idea why; one such offer is sitting in the live tclk-offers room right now.
+# Note that `expiresMs` is required on an offer, which is easy to miss because
+# the field reads as optional.
+KEYS = {
+    "offer": (
+        ("type", "from", "role", "amount", "asset", "lock", "rails", "claimByMs",
+         "refundAfterMs", "expiresMs", "paymentKey", "job", "nonce", "id"),
+        ("from", "role", "amount", "asset", "lock", "rails", "claimByMs",
+         "refundAfterMs", "expiresMs", "nonce", "id"),
+    ),
+    "accept": (
+        ("type", "from", "ref", "statement", "contract", "paymentKey", "nonce"),
+        ("from", "ref", "statement", "contract", "nonce"),
+    ),
+    "lock": (
+        ("type", "from", "contract", "rail", "ref", "presig"),
+        ("from", "contract", "rail", "ref"),
+    ),
+    "reveal": (
+        ("type", "from", "contract", "secret"),
+        ("from", "contract", "secret"),
+    ),
+    "refund": (("type", "from", "contract", "reason"), ("from", "contract")),
+    "cancel": (("type", "from", "contract", "reason"), ("from", "contract")),
+    "receipt": (
+        ("type", "from", "contract", "outcome", "rail", "ref"),
+        ("from", "contract", "outcome"),
+    ),
+}
+
 
 class TclkError(ValueError):
     """An invalid frame or an invalid construction. `step` never raises this."""
@@ -126,9 +161,14 @@ def hash_lock(secret: str) -> str:
 
 
 def make_offer(*, frm, amount, asset, rails, claim_by_ms, refund_after_ms,
-               role="payer", lock="hash", payment_key=None, expires_ms=None,
+               expires_ms, role="payer", lock="hash", payment_key=None,
                job=None, nonce=None) -> dict:
-    """Build an offer frame and compute its id."""
+    """Build an offer frame and compute its id.
+
+    `expires_ms` has no default because the specification requires it on every
+    offer. It reads as an optional field and is easy to leave out, and an offer
+    without it is refused by a conforming reader.
+    """
     if role not in ("payer", "payee"):
         raise TclkError("role must be payer or payee")
     if lock not in ("hash", "point"):
@@ -182,8 +222,31 @@ def make_accept(offer: dict, *, frm, statement, payment_key=None, nonce=None) ->
     return dict(core, type="accept", contract=contract_id(offer, core))
 
 
+def validate_frame(frame: dict) -> dict:
+    """Check a frame structurally against the KEYS table. Fail-closed.
+
+    Returns the frame so it can be used inline; raises TclkError naming the
+    first problem, because "invalid frame" alone tells a caller nothing.
+    """
+    if not isinstance(frame, dict):
+        raise TclkError("frame is not an object")
+    kind = frame.get("type")
+    if kind not in KEYS:
+        raise TclkError(f"unknown frame type: {kind!r}")
+    allowed, required = KEYS[kind]
+    present = {k for k, v in frame.items() if v is not None}
+    missing = [k for k in required if k not in present]
+    if missing:
+        raise TclkError(f"{kind} frame is missing {', '.join(missing)}")
+    unknown = sorted(present - set(allowed))
+    if unknown:
+        raise TclkError(f"{kind} frame carries unknown field(s): {', '.join(unknown)}")
+    return frame
+
+
 def encode_frame(frame: dict) -> str:
     """Render a frame for the wire: 'tclk1 ' plus escaped canonical JSON."""
+    validate_frame(frame)
     line = TCLK_PREFIX + canonical_json(_strip_none(frame))
     if len(line) > MAX_FRAME_CHARS:
         raise TclkError(f"frame is {len(line)} characters, cap is {MAX_FRAME_CHARS}")
@@ -203,9 +266,7 @@ def decode_frame(text: str) -> dict:
         frame = json.loads(text[len(TCLK_PREFIX):])
     except json.JSONDecodeError:
         raise TclkError("frame is not valid JSON") from None
-    if not isinstance(frame, dict) or frame.get("type") not in FRAME_TYPES:
-        raise TclkError("unknown frame type")
-    return frame
+    return validate_frame(frame)
 
 
 # -------------------------------------------------------- state machine --
