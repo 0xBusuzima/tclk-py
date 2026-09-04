@@ -153,6 +153,36 @@ def new_secret() -> str:
     return "0x" + secrets.token_hex(32)
 
 
+def is_valid_statement(lock, statement) -> bool:
+    """Does `statement` mean anything under this lock kind?
+
+    An unknown lock kind verifies NOTHING. Returning True for one would accept
+    an acceptance whose statement no reveal can ever open, and the payer would
+    lock against it: money committed to a lock with no key.
+    """
+    if not isinstance(statement, str):
+        return False
+    if lock == "hash":
+        return bool(HEX32.match(statement))
+    if lock == "point":
+        return bool(HEX33.match(statement))
+    return False
+
+
+def _ms(value):
+    """A wire timestamp as an int, or None if it is not a finite number.
+
+    Deadlines arrive from a world-writable room. int("abc") raises, and `step`
+    promises never to raise: one malformed offer would take down a fold running
+    over a whole room of strangers.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return int(value)
+
+
 def hash_lock(secret: str) -> str:
     """The statement for a hash lock: sha256 over the secret's bytes."""
     if not HEX32.match(secret or ""):
@@ -262,6 +292,13 @@ def is_tclk_line(text: str) -> bool:
 def decode_frame(text: str) -> dict:
     if not is_tclk_line(text):
         raise TclkError("not a tclk/1 line")
+    # The encoder refuses to emit a frame past the room's message cap, so the
+    # decoder has to refuse to read one. Otherwise a line that could never have
+    # been written by a conforming sender is accepted by a conforming reader,
+    # which is the wrong asymmetry: the strict side should be the one taking
+    # input from strangers.
+    if len(text) > MAX_FRAME_CHARS:
+        raise TclkError(f"frame is {len(text)} characters, cap is {MAX_FRAME_CHARS}")
     try:
         frame = json.loads(text[len(TCLK_PREFIX):])
     except json.JSONDecodeError:
@@ -292,14 +329,26 @@ def step(state: dict, frame: dict, now_ms=None) -> dict:
     over every line of a world-writable room, where most lines are not yours
     and some are junk.
     """
-    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     out = dict(state)
 
     def no(reason):
         return {"ok": False, "reason": reason, "state": state}
 
+    now_ms = int(time.time() * 1000) if now_ms is None else _ms(now_ms)
+    if now_ms is None or now_ms < 0:
+        # A clock that is NaN, infinite or negative silently sails past every
+        # deadline comparison, so a reveal months late would fold to claimed.
+        return no("nowMs must be a finite non-negative number")
+
     kind = frame.get("type")
     offer = state.get("offer") or {}
+    expires_ms = _ms(offer.get("expiresMs"))
+    refund_ms = _ms(offer.get("refundAfterMs"))
+
+    if refund_ms is None:
+        # Every deadline comparison below depends on this one. Reading a
+        # malformed offer as if it had no deadline is worse than refusing it.
+        return no("the offer carries no usable refundAfterMs")
 
     if kind == "receipt":
         # A post-terminal acknowledgment. It makes no transition, but it is not
@@ -313,6 +362,16 @@ def step(state: dict, frame: dict, now_ms=None) -> dict:
         if frame.get("outcome") != state.get("status"):
             return no(f"receipt outcome {frame.get('outcome')} does not match "
                       f"{state.get('status')}")
+        # The rail and its reference are the settlement side of the record. A
+        # receipt naming a different rail than the lock used describes a payment
+        # that did not happen on the leg this contract actually ran.
+        if (frame.get("rail") is not None and state.get("rail") is not None
+                and frame.get("rail") != state.get("rail")):
+            return no(f"receipt rail {frame.get('rail')} does not match "
+                      f"contract rail {state.get('rail')}")
+        if (frame.get("ref") is not None and state.get("rail_ref") is not None
+                and frame.get("ref") != state.get("rail_ref")):
+            return no("receipt ref does not match the contract's rail reference")
         return {"ok": True, "state": state}
 
     if kind not in TRANSITIONS.get(state.get("status", "proposed"), {}):
@@ -322,6 +381,12 @@ def step(state: dict, frame: dict, now_ms=None) -> dict:
             return no("this acceptance refers to a different offer")
         if frame.get("from") == offer.get("from"):
             return no("the offering party cannot accept its own offer")
+        if expires_ms is None:
+            return no("the offer carries no usable expiresMs")
+        if now_ms >= expires_ms:
+            return no("the offer has expired")
+        if not is_valid_statement(offer.get("lock"), frame.get("statement")):
+            return no(f"statement does not fit a {offer.get('lock')!r} lock")
         out.update(status="accepted", accept=frame, contract=frame.get("contract"),
                    statement=frame.get("statement"), payee=frame.get("from"))
     elif kind == "lock":
@@ -331,13 +396,18 @@ def step(state: dict, frame: dict, now_ms=None) -> dict:
             return no("this lock belongs to a different contract")
         if frame.get("rail") not in (offer.get("rails") or []):
             return no("rail was not named in the offer")
-        out.update(status="locked", lock=frame, rail=frame.get("rail"))
+        if now_ms >= refund_ms:
+            # Locking into a window that is already refundable funds nothing:
+            # the payer could reclaim it the same instant.
+            return no("the refund window has opened, the lock is too late")
+        out.update(status="locked", lock=frame, rail=frame.get("rail"),
+                   rail_ref=frame.get("ref"))
     elif kind == "reveal":
         if frame.get("from") != state.get("payee"):
             return no("only the accepting party reveals")
         if frame.get("contract") != state.get("contract"):
             return no("this reveal belongs to a different contract")
-        if now_ms >= int(offer.get("refundAfterMs", 0)):
+        if now_ms >= refund_ms:
             return no("the refund window has opened, the reveal is late")
         secret = frame.get("secret") or ""
         if not HEX32.match(secret):
@@ -348,7 +418,7 @@ def step(state: dict, frame: dict, now_ms=None) -> dict:
     elif kind == "refund":
         if frame.get("from") != offer.get("from"):
             return no("only the offering party is refunded")
-        if now_ms < int(offer.get("refundAfterMs", 0)):
+        if now_ms < refund_ms:
             return no("the refund window has not opened yet")
         out.update(status="refunded")
     elif kind == "cancel":

@@ -80,19 +80,36 @@ plainly:
 > or a future one in another language) that disagrees is wrong. Fix the
 > implementation, never the vector.
 
-All four pass here, along with 41 further checks on the specification's rules
+All four pass here, along with 53 further checks on the specification's rules
 and the state machine.
 
 ```
 $ python tests/test_vectors.py
-  passed 45, failed 0
+  passed 57, failed 0
   all vectors and rules hold.
 ```
 
-Tracked against upstream. The `receipt` guards landed here after the reference
-implementation added them in *reject contradictory receipt outcomes*: a receipt
-must name the contract it belongs to, come from a party, and claim the outcome
-the contract actually reached. It still makes no transition.
+Tracked against upstream, which moved fast on 3 September 2026. What landed here
+from that batch, and why each one matters to a reader folding a room of
+strangers:
+
+- **The clock is validated.** A `nowMs` that is NaN, infinite or negative sails
+  past every deadline comparison, so a reveal months late would fold to
+  `claimed`.
+- **Deadlines are read as numbers or refused.** They arrive from a
+  world-writable room and `int("abc")` raises, while `step` promises never to
+  raise. One malformed offer would otherwise take down a fold over a whole room.
+- **An unknown lock kind verifies nothing.** Accepting under one would have the
+  payer lock against a statement no reveal can open.
+- **An acceptance is refused after `expiresMs`, a lock after `refundAfterMs`.**
+  Locking into an already-refundable window funds nothing.
+- **`decode` enforces the room-message cap the encoder already did.** The strict
+  side should be the one taking input from strangers.
+- **`receipt` guards**, from *reject contradictory receipt outcomes* and
+  *reject contradictory receipt rail/ref*: a receipt must name the contract it
+  belongs to, come from a party, claim the outcome the contract actually
+  reached, and not name a rail or reference the contract never used. It still
+  makes no transition.
 
 No network, no pytest, no fixtures to download.
 

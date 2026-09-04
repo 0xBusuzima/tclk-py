@@ -172,6 +172,14 @@ def test_machine():
     statement = tclk.hash_lock(secret)
     accept = tclk.make_accept(offer, frm=PAYEE, statement=statement)
 
+    # The vector offer's deadlines are fixed points in the past, so every step
+    # below names the clock explicitly. It has to: accept is now refused after
+    # expiresMs and lock after refundAfterMs, and a test that leaned on the real
+    # clock would pass or fail depending on the day it ran.
+    BEFORE = 1756700000000            # before expiresMs
+    DURING = 1756703000000            # locked and claimable
+    AFTER = 1756707300000             # past refundAfterMs
+
     st = tclk.initial_state(offer)
     check("starts proposed", st["status"] == "proposed")
 
@@ -181,7 +189,7 @@ def test_machine():
     check("an out-of-turn reveal is refused", not r["ok"])
     check("a refused frame leaves the state untouched", r["state"] == st)
 
-    r = tclk.step(st, accept)
+    r = tclk.step(st, accept, now_ms=BEFORE)
     check("accept -> accepted", r["ok"] and r["state"]["status"] == "accepted")
     st = r["state"]
 
@@ -190,11 +198,11 @@ def test_machine():
     check("the wrong party cannot lock", not r["ok"])
 
     r = tclk.step(st, {"type": "lock", "from": PAYER, "contract": accept["contract"],
-                       "rail": "bilinmeyen-rail", "ref": "r1"})
+                       "rail": "bilinmeyen-rail", "ref": "r1"}, now_ms=DURING)
     check("a rail absent from the offer is refused", not r["ok"])
 
     r = tclk.step(st, {"type": "lock", "from": PAYER, "contract": accept["contract"],
-                       "rail": "flop-htlc", "ref": "r1"})
+                       "rail": "flop-htlc", "ref": "r1"}, now_ms=DURING)
     check("lock -> locked", r["ok"] and r["state"]["status"] == "locked")
     st = r["state"]
 
@@ -246,12 +254,43 @@ def test_machine():
     # must be skipped rather than raised on.
     lines = ["gm", "tclk1 bozuk-json", tclk.encode_frame(accept), "", "tclk1 {}"]
     try:
-        state, rejected = tclk.fold(offer, lines)
+        state, rejected = tclk.fold(offer, lines, now_ms=BEFORE)
         ok = state["status"] == "accepted" and len(rejected) >= 2
     except Exception as exc:                                   # noqa: BLE001
         ok = False
         print("     raised:", exc)
     check("a valid transition is found among junk lines", ok)
+
+    # Deadlines arrive from a world-writable room, and int("abc") raises. `step`
+    # promises never to raise, so one malformed offer must not take down a fold
+    # running over a whole room of strangers.
+    for bad in ("abc", None, float("nan"), float("inf"), True, [1]):
+        broken = dict(offer, refundAfterMs=bad)
+        try:
+            st_b, _ = tclk.fold(broken, [tclk.encode_frame(accept)], now_ms=BEFORE)
+            ok = st_b["status"] == "proposed"
+        except Exception as exc:                               # noqa: BLE001
+            ok = False
+            print("     raised:", exc)
+        check(f"a malformed refundAfterMs ({bad!r}) is refused, not raised", ok)
+
+    for bad_clock in (float("nan"), float("inf"), -1, "now"):
+        r = tclk.step(tclk.initial_state(offer), accept, now_ms=bad_clock)
+        check(f"a clock of {bad_clock!r} is refused", not r["ok"])
+
+    # An unknown lock kind verifies nothing, so an acceptance under one cannot
+    # stand: the payer would otherwise lock against a statement no reveal opens.
+    weird = dict(offer, lock="moon")
+    r = tclk.step(tclk.initial_state(weird), accept, now_ms=BEFORE)
+    check("an acceptance under an unknown lock kind is refused", not r["ok"])
+
+    over = "tclk1 " + "x" * tclk.MAX_FRAME_CHARS
+    try:
+        tclk.decode_frame(over)
+        ok = False
+    except tclk.TclkError:
+        ok = True
+    check("decode refuses a frame past the room-message cap", ok)
 
 
 if __name__ == "__main__":
