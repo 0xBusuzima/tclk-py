@@ -79,6 +79,21 @@ def scan_offers(offers, accepts, invalid, seen_bad):
             accepts[frame["contract"]] = frame
 
 
+def replay_clock(offer):
+    """The clock to re-fold a finished deal under, or None if it has none.
+
+    Not `claimByMs - 1`, which is what this used until the accept step started
+    honouring `expiresMs`. An offer expires BEFORE its claim window shuts, so a
+    clock just under claimByMs is already past expiry and the acceptance - the
+    very first transition - is refused, making every finished deal read as
+    `proposed`. The chain replays under a clock just before the earliest
+    deadline any of its frames had to satisfy.
+    """
+    stamps = [v for v in (offer.get("expiresMs"), offer.get("refundAfterMs"))
+              if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return int(min(stamps)) - 1 if stamps else None
+
+
 def fold_deal(offer, accept):
     """Follow one deal into its own room and fold it. Returns a record."""
     contract = accept["contract"]
@@ -87,7 +102,10 @@ def fold_deal(offer, accept):
     # The accept was posted in the offers room, so the deal room's own lines
     # begin at `lock` and would fold against a `proposed` state.
     history = [tclk.encode_frame(accept)] + lines
-    state, rejected = tclk.fold(offer, history, now_ms=offer["claimByMs"] - 1)
+    clock = replay_clock(offer)
+    if clock is None:
+        raise tclk.TclkError("offer carries no usable deadline to replay under")
+    state, rejected = tclk.fold(offer, history, now_ms=clock)
     return {"contract": contract, "room": deal_room, "status": state["status"],
             "frames": len(history), "rejected": len(rejected),
             "asset": offer["asset"], "amount": offer["amount"],
